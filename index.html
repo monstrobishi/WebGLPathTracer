@@ -1,35 +1,18 @@
 <html>
     <head>
         <title>WebGL Path Tracer Demo</title>
-        <script type="text/javascript" src="gl-matrix-min.js"></script>
-
-        <script id="shader-vs" type="x-shader/x-vertex">
-            attribute vec3 aVertexPosition;
-            varying vec3 fPos;
-            varying vec3 rDir;
-            varying vec3 rOrigin;
-
-            void main() 
-            {
-                fPos = aVertexPosition;
-
-                rOrigin = vec3(0.0, 0.0, 0.0);
-                rDir = normalize(fPos - vec3(0.0, 0.0, 0.5));
-
-                gl_Position = vec4(aVertexPosition, 1.0);
-            }
-        </script>
-
-        <script id="shader-fs" type="x-shader/x-fragment">
+        <script id="trace-shader-fs" type="x-shader/x-fragment">
             precision mediump float;
-            varying vec3 fPos;
+            uniform float runCounter;
             varying vec3 rDir;
             varying vec3 rOrigin;
 
-            #define SCENE_SIZE 7
-            #define MAX_DIST 1000000.0
+            #define SCENE_SIZE 8
+            #define MAX_DIST 100.0
             #define BOX_SIZE 1.0
-            #define WALL_SIZE 100000.0
+            #define WALL_SIZE 1000.0
+            #define EPSILON 0.001
+            #define BOUNCES 5
 
             struct sphere
             {
@@ -37,6 +20,12 @@
                 float r;
                 vec3 color;
             } scene[SCENE_SIZE];
+
+            struct light
+            {
+                vec3 pos;
+                float r;
+            } light_source;
 
             float raySphere(vec3 o, vec3 d, vec3 p, float r)
             {
@@ -52,22 +41,86 @@
                 return dist;
             }
 
-            vec3 traceScene(vec3 o, vec3 d)
+            // Tests a ray against all the objects in the scene and returns the color, hit position and normal vector
+            vec3 traceScene(in vec3 o, in vec3 d, out vec3 hitPos, out vec3 norm)
             {
                 vec3 result = vec3(0.0);
                 float minDist = MAX_DIST;
 
                 for(int i = 0;i < SCENE_SIZE;i++)
                 {
-                    float rayDist = raySphere(o, d, scene[i].pos, scene[i].r);
-                    if(rayDist < minDist)
+                    vec3 spherePos = scene[i].pos;
+                    float rayDist = raySphere(o, d, spherePos, scene[i].r);
+
+                    // Need to optimise this branch.
+                    if(rayDist < minDist && rayDist > 0.0)
                     {
                         minDist = rayDist;
+                        hitPos = o + rayDist * d;
+                        norm = hitPos - spherePos;
                         result = scene[i].color;
                     }
                 }
 
+                // Test lightsource.
+                vec3 spherePos = light_source.pos;
+                float rayDist = raySphere(o, d, spherePos, light_source.r);
+                if(rayDist < minDist && rayDist > 0.0)
+                    result = vec3(-1.0);
+
                 return result;
+            }
+
+            float rand(vec2 co)
+            {
+                return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453);
+            }
+
+            // This does not have a uniform distribution over a sphere.
+            vec3 randomVector(vec2 co)
+            {
+                vec3 randVec = vec3(rand(co), 
+                                    rand(co + vec2(0.0, 5.0)), 
+                                    rand(co + vec2(0.0, 10.0)));
+                randVec *= 2.0;
+                randVec -= vec3(1.0);
+                return normalize(randVec);
+            }
+
+            // The main pathtracing "kernel"
+            vec3 pathTrace(vec3 o, vec3 d)
+            {
+                vec3 hitPos;
+                vec3 norm;
+                
+                float finalMult = 0.0;
+
+                // Trace from the eye.
+                vec3 result = traceScene(o, d, hitPos, norm);
+                norm = normalize(norm);  
+                vec3 contrib = result;
+
+                if(result.x < 0.0)
+                    return vec3(1.0);
+
+                for(int i = 0;i < BOUNCES;i++)
+                {
+                    vec3 randDir = randomVector(d.xy + vec2(runCounter, float(i)));
+                    if(dot(randDir, norm) < 0.0)
+                        randDir = -randDir;
+
+                    float ct = dot(randDir, norm);
+
+                    result = traceScene(hitPos - EPSILON, randDir, hitPos, norm);
+                    norm = normalize(norm); 
+
+                    if(result.x < 0.0)
+                        return contrib * 25.0; // Arbitrary value for brightness.
+                    
+                    contrib *= ct * result;
+                }
+
+                return vec3(0.0);
             }
 
             void main() 
@@ -93,23 +146,73 @@
                 scene[4].r = WALL_SIZE;
                 scene[4].color = vec3(0.76, 0.75, 0.5);
 
-                scene[5].pos = vec3(-0.5, 0.5, -0.5);
-                scene[5].r = 0.5;
-                scene[5].color = vec3(1.0, 1.0, 1.0);
+                scene[5].pos = vec3(0.0, 0.0, -WALL_SIZE - BOX_SIZE);
+                scene[5].r = WALL_SIZE;
+                scene[5].color = vec3(0.76, 0.75, 0.5);
 
-                scene[6].pos = vec3(0.5, 0.5, -0.5);
-                scene[6].r = 0.5;
+                scene[6].pos = vec3(0.6, -0.8, 0.0);
+                scene[6].r = 0.3;
                 scene[6].color = vec3(1.0, 1.0, 1.0);
 
+                scene[7].pos = vec3(-0.5, -0.7, 0.0);
+                scene[7].r = 0.5;
+                scene[7].color = vec3(1.0, 1.0, 1.0);
+
+                light_source.pos = vec3(0.0, 1.9, 0.0);
+                light_source.r = 1.0;
+
                 vec3 nRayDir = normalize(rDir);
-                gl_FragColor = vec4(traceScene(rOrigin, nRayDir), 1.0);
+                vec3 outColor = pathTrace(rOrigin, nRayDir);
+                gl_FragColor = vec4(outColor, 1.0 / runCounter);
+            }
+        </script>
+
+        <script id="trace-shader-vs" type="x-shader/x-vertex">
+            attribute vec3 aVertexPosition;
+            varying vec3 rDir;
+            varying vec3 rOrigin;
+
+            void main() 
+            {
+                vec3 fPos = aVertexPosition;
+
+                rOrigin = vec3(0.0, 0.0, -1.5);
+                rDir = normalize(fPos - vec3(0.0, 0.0, -1.0));
+
+                gl_Position = vec4(aVertexPosition, 1.0);
+            }
+        </script>
+
+        <script id="blit-shader-fs" type="x-shader/x-fragment">
+            precision mediump float;
+            varying vec3 fPos;
+            uniform sampler2D screenColor;
+
+            void main() 
+            {
+                vec2 texCoords = fPos.xy * 0.5 + vec2(0.5);
+                gl_FragColor = texture2D(screenColor, texCoords);
+            }
+        </script>
+
+        <script id="blit-shader-vs" type="x-shader/x-vertex">
+            attribute vec3 aVertexPosition;
+            varying vec3 fPos;
+
+            void main() 
+            {
+                fPos = aVertexPosition;
+                gl_Position = vec4(aVertexPosition, 1.0);
             }
         </script>
 
         <script type="text/javascript">
             var gl;
-            var shaderProgram;
+            var traceProgram;
+            var blitProgram;
             var squareVertexPositionBuffer;
+            var accumFrameBuffer;
+            var accumTexture;
 
             function createShader(id)
             {
@@ -125,17 +228,40 @@
             }
 
             var frameCounter = 0;
+            var runCounter = 1;
 
             function renderQuad() 
             {
-                gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
                 gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                
+                // Path trace
+                gl.bindFramebuffer(gl.FRAMEBUFFER, accumFrameBuffer);
 
+                gl.enable(gl.BLEND);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, null);
+                gl.useProgram(traceProgram);
+                gl.uniform1f(gl.getUniformLocation(traceProgram, "runCounter"), runCounter);
+                
                 gl.bindBuffer(gl.ARRAY_BUFFER, squareVertexPositionBuffer);
-                gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, squareVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+                gl.vertexAttribPointer(traceProgram.vertexPositionAttribute, squareVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
                 gl.drawArrays(gl.TRIANGLE_STRIP, 0, squareVertexPositionBuffer.numItems);
                 
+                // Blit to screen.
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+                gl.useProgram(blitProgram);
+                gl.disable(gl.BLEND);
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, accumTexture);
+                gl.uniform1i(gl.getUniformLocation(blitProgram, "screenColor"), 0);
+                
+                gl.bindBuffer(gl.ARRAY_BUFFER, squareVertexPositionBuffer);
+                gl.vertexAttribPointer(traceProgram.vertexPositionAttribute, squareVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, squareVertexPositionBuffer.numItems);
+
                 frameCounter++;
+                runCounter++;
 
                 setTimeout(renderQuad, 1);
             }
@@ -146,13 +272,46 @@
                 frameCounter = 0;
             }
 
+
             function initPathTracer()
             {
                 // Init context
                 var canvas = document.getElementById("pathtracer");
-                gl = canvas.getContext("experimental-webgl");
+                gl = canvas.getContext("experimental-webgl", {alpha:false});
                 gl.viewportWidth = canvas.width;
                 gl.viewportHeight = canvas.height;
+
+                // Initialise accumulation buffer
+                gl.getExtension("OES_texture_float");
+                gl.getExtension('OES_texture_half_float');
+
+                accumFrameBuffer = gl.createFramebuffer();
+                gl.bindFramebuffer(gl.FRAMEBUFFER, accumFrameBuffer);
+                accumFrameBuffer.width = 512;
+                accumFrameBuffer.height = 512;
+
+                accumTexture = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, accumTexture);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, accumFrameBuffer.width, accumFrameBuffer.height, 0, gl.RGBA, gl.FLOAT, null);
+
+                var renderbuffer = gl.createRenderbuffer();
+                gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer);
+                gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, accumFrameBuffer.width, accumFrameBuffer.height);
+
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, accumTexture, 0);
+                gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, renderbuffer);
+
+                if(gl.checkFramebufferStatus(gl.FRAMEBUFFER) == gl.FRAMEBUFFER_COMPLETE)
+                    console.log("Floating point framebuffer supported");
+
+                gl.bindTexture(gl.TEXTURE_2D, null);
+                gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
                 // Create triangle data
                 squareVertexPositionBuffer = gl.createBuffer();
@@ -170,26 +329,47 @@
                 squareVertexPositionBuffer.itemSize = 3;
                 squareVertexPositionBuffer.numItems = 4;
 
-                // Init shaders
-                var fragmentShader = createShader("shader-fs");
-                var vertexShader = createShader("shader-vs");
+                // Init shaders for tracer
+                var fragmentShader = createShader("trace-shader-fs");
+                var vertexShader = createShader("trace-shader-vs");
 
-                shaderProgram = gl.createProgram();
-                gl.attachShader(shaderProgram, vertexShader);
-                gl.attachShader(shaderProgram, fragmentShader);
-                gl.linkProgram(shaderProgram);
+                traceProgram = gl.createProgram();
+                gl.attachShader(traceProgram, vertexShader);
+                gl.attachShader(traceProgram, fragmentShader);
+                gl.linkProgram(traceProgram);
 
-                if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS))
+                if (!gl.getProgramParameter(traceProgram, gl.LINK_STATUS))
                     alert("Could not initialise shaders");
 
-                gl.useProgram(shaderProgram);
+                gl.useProgram(traceProgram);
 
-                shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
-                gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+                traceProgram.vertexPositionAttribute = gl.getAttribLocation(traceProgram, "aVertexPosition");
+                gl.enableVertexAttribArray(traceProgram.vertexPositionAttribute);
+
+                // Init shaders for blit
+                fragmentShader = createShader("blit-shader-fs");
+                vertexShader = createShader("blit-shader-vs");
+
+                blitProgram = gl.createProgram();
+                gl.attachShader(blitProgram, vertexShader);
+                gl.attachShader(blitProgram, fragmentShader);
+                gl.linkProgram(blitProgram);
+
+                if (!gl.getProgramParameter(blitProgram, gl.LINK_STATUS))
+                    alert("Could not initialise shaders");
+
+                gl.useProgram(blitProgram);
+
+                blitProgram.vertexPositionAttribute = gl.getAttribLocation(blitProgram, "aVertexPosition");
+                gl.enableVertexAttribArray(blitProgram.vertexPositionAttribute);
+
+                // Begin rendering.
+                gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);                
+                gl.disable(gl.DEPTH_TEST);
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
                 renderQuad();
                 setInterval(showFrameTime, 1000);
-                //window.requestAnimationFrame(renderQuad, canvas);
             }
         </script>
     </head>
